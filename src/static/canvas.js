@@ -125,7 +125,7 @@ function Canvas({ onResult }) {
 
     if (pixels.length !== 784 || pixels.every(p => p < 0.05)) return;
 
-    fetch(`${process.env.REACT_APP_API_URL}/predict`, {
+    fetch(process.env.REACT_APP_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pixels }),
