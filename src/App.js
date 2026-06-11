@@ -15,17 +15,6 @@ function App() {
         PyTorch CNN trained on 60,000 samples — draw any digit and see per-class
         confidence scores and live conv filter activations.
       </p>
-      <div className="header-btn-row">
-        <a
-          href="https://github.com/sassom2112/mnist-digit-recognition"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="github-btn"
-        >
-          GitHub
-        </a>
-      </div>
-
       <div className="viz-layout">
         <div className="center-panel">
           <Canvas onResult={setResult} />
