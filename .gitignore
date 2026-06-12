@@ -24,3 +24,7 @@ yarn-error.log*
 
 # AWS CLI installer
 awscliv2.zip
+
+# Model weights (loaded from S3 in prod via MODEL_BUCKET/MODEL_KEY)
+src/model.pt
+*.pth
