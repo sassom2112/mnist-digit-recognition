@@ -1,30 +1,27 @@
-# app.py 
 import os
+import json
 import torch
 import torch.nn as nn
 import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import awsgi
-
 
 app = Flask(__name__)
 CORS(app)
 
-# Define the CNN model (same as in mnist.py)
 class CNNClassifier(nn.Module):
     def __init__(self, num_classes=10):
         super(CNNClassifier, self).__init__()
         self.layers = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),  # Output: 32 x 28 x 28
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.MaxPool2d(2),                             # Output: 32 x 14 x 14
+            nn.MaxPool2d(2),
 
-            nn.Conv2d(32, 64, kernel_size=3, padding=1), # Output: 64 x 14 x 14
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(2),                             # Output: 64 x 7 x 7
+            nn.MaxPool2d(2),
 
             nn.Flatten(),
             nn.Linear(64 * 7 * 7, 128),
@@ -35,41 +32,40 @@ class CNNClassifier(nn.Module):
     def forward(self, x):
         return self.layers(x)
 
-# Instantiate the model
-model = CNNClassifier()
+def _resolve_model_path():
+    bucket = os.environ.get('MODEL_BUCKET')
+    if not bucket:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'model.pt')
+    local_path = '/tmp/model.pt'
+    if not os.path.exists(local_path):
+        import boto3
+        key = os.environ.get('MODEL_KEY', 'model.pt')
+        boto3.client('s3').download_file(bucket, key, local_path)
+        print(f"Model downloaded from s3://{bucket}/{key}")
+    return local_path
 
-# Load the trained model weights
+model = CNNClassifier()
 try:
-    model.load_state_dict(torch.load('model.pth', map_location=torch.device('cpu')))
+    model.load_state_dict(torch.load(_resolve_model_path(), map_location=torch.device('cpu')))
     print("Model loaded successfully.")
 except Exception as e:
     print(f"Error loading model: {e}")
 
-model.eval()  # Set model to evaluation mode
+model.eval()
 
-@app.route('/predict', methods=['POST'])
-def predict():
-    data = request.get_json()
-    pixels = data.get('pixels', None)  # Safely get 'pixels' from JSON
 
-    if pixels is None or not isinstance(pixels, list) or len(pixels) != 784:
-        return jsonify({'error': 'Invalid input data. Expecting a list of 784 pixel values.'}), 400
-
-    # Convert list to numpy array and reshape to [1, 28, 28]
+def run_inference(pixels_list):
+    if not isinstance(pixels_list, list) or len(pixels_list) != 784:
+        return None, 'Invalid input: expecting a list of 784 pixel values.'
     try:
-        pixels = np.array(pixels, dtype=np.float32).reshape(1, 28, 28)
+        pixels = np.array(pixels_list, dtype=np.float32).reshape(1, 28, 28)
     except ValueError:
-        return jsonify({'error': 'Pixel data could not be reshaped to 28x28.'}), 400
+        return None, 'Pixel data could not be reshaped to 28x28.'
 
-    # Normalize the pixels (same as during training)
-    pixels = (pixels - 0.5) / 0.5  # Normalize to [-1, 1]
+    pixels = (pixels - 0.5) / 0.5
+    input_tensor = torch.from_numpy(pixels).unsqueeze(0)
 
-    # Convert to torch tensor and add batch and channel dimensions
-    input_tensor = torch.from_numpy(pixels).unsqueeze(0)  # Shape: [1, 1, 28, 28]
-
-    # Capture intermediate activations via hooks
     activations = {}
-
     def make_hook(name):
         def hook(module, inp, output):
             activations[name] = output.detach()
@@ -89,7 +85,7 @@ def predict():
     confidences = torch.softmax(outputs, dim=1).squeeze().tolist()
 
     def process_maps(act):
-        act = act.squeeze(0).numpy()  # [C, H, W]
+        act = act.squeeze(0).numpy()
         result = []
         for i in range(act.shape[0]):
             fm = act[i]
@@ -98,36 +94,42 @@ def predict():
             result.append(fm.tolist())
         return result
 
-    return jsonify({
+    return {
         'prediction': prediction,
         'confidences': confidences,
         'conv1': process_maps(activations['conv1']),
         'conv2': process_maps(activations['conv2']),
-    })
+    }, None
 
-# Lambda handler
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    data = request.get_json()
+    result, error = run_inference(data.get('pixels') if data else None)
+    if error:
+        return jsonify({'error': error}), 400
+    return jsonify(result)
+
+
 def lambda_handler(event, context):
-    if event['httpMethod'] == 'OPTIONS':
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'POST, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type',
-            },
-            'body': ''
-        }
+    cors_headers = {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+    }
 
-    if event['httpMethod'] == 'POST' and event['path'] == '/predict':
-        response = awsgi.response(app, event, context)
-        response['headers']['Access-Control-Allow-Origin'] = '*'
-        return response
-    else:
-        return {
-            'statusCode': 404,
-            'body': 'Not Found'
-        }
+    if event.get('httpMethod') == 'OPTIONS':
+        return {'statusCode': 200, 'headers': cors_headers, 'body': ''}
 
+    try:
+        body = json.loads(event.get('body') or '{}')
+        result, error = run_inference(body.get('pixels'))
+        if error:
+            return {'statusCode': 400, 'headers': cors_headers, 'body': json.dumps({'error': error})}
+        return {'statusCode': 200, 'headers': cors_headers, 'body': json.dumps(result)}
+    except Exception as e:
+        return {'statusCode': 500, 'headers': cors_headers, 'body': json.dumps({'error': str(e)})}
 
 
 if __name__ == "__main__":
